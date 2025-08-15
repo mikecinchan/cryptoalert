@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>codec (SOL) — 4h EMA & StochRSI Dashboard</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root{
+      --bg:#0b0f14; --panel:#111723; --text:#e8eef7; --muted:#9fb0c3; --accent:#59b7ff;
+      --up:#2ecc71; --down:#e74c3c; --k:#f1c40f; --d:#9b59b6; --grid:#1b2533;
+    }
+    *{box-sizing:border-box} body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; background:var(--bg); color:var(--text);} 
+    header{padding:18px 18px 6px;}
+    h1{font-size:18px; margin:0 0 6px}
+    .sub{color:var(--muted); font-size:12px}
+    .wrap{max-width:1200px; margin:0 auto; padding:0 16px 28px}
+    .panel{background:var(--panel); border:1px solid #1a2330; border-radius:16px; padding:14px; box-shadow:0 8px 24px rgba(0,0,0,.2)}
+    .row{display:flex; gap:14px; flex-wrap:wrap}
+    .col{flex:1 1 420px}
+    label{font-size:12px; color:var(--muted); display:block; margin-bottom:4px}
+    input, select, button{height:38px; border-radius:10px; border:1px solid #243246; background:#0d1420; color:var(--text); padding:0 12px}
+    button{cursor:pointer; background:#133456; border-color:#1e4770}
+    button:hover{filter:brightness(1.08)}
+    .grid{display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px}
+    .stat{background:#0d1420; border:1px solid #1a2330; border-radius:12px; padding:10px}
+    .stat .k{font-size:11px; color:var(--muted)} .stat .v{font-size:16px}
+    canvas{background:#0c111a; border:1px solid #1a2330; border-radius:12px}
+    footer{padding:16px; color:var(--muted); font-size:12px; text-align:center}
+    .note{color:var(--muted); font-size:12px; margin:8px 0}
+    .debug{background:#2c1810; border:1px solid #4a2f1e; border-radius:8px; padding:10px; margin:10px 0; font-size:11px}
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <h1>codec (SOL) — 4h EMA & StochRSI Dashboard (Fixed)</h1>
+    <div class="sub">Data from GeckoTerminal public API. Fixed RSI alignment and EMA calculation.</div>
+  </header>
+
+  <main class="wrap">
+    <section class="panel" id="controls">
+      <div class="row" style="align-items:flex-end">
+        <div>
+          <label for="token">Token Address (Solana)</label>
+          <input id="token" size="54" value="69LjZUUzxj3Cb3Fxeo1X4QpYEQTboApkhXTysPpbpump" />
+        </div>
+        <div>
+          <label for="agg">Timeframe</label>
+          <select id="agg">
+            <option value="4" selected>4h (hour ×4)</option>
+            <option value="1">1h</option>
+            <option value="12">12h</option>
+            <option value="24">1d (hour ×24)</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="refresh">Refresh</button>
+        </div>
+        <div style="flex:1 1 auto"></div>
+        <div class="note" id="status">Ready.</div>
+      </div>
+      <div class="grid" style="margin-top:12px">
+        <div class="stat"><div class="k">Pool</div><div class="v" id="poolId">—</div></div>
+        <div class="stat"><div class="k">DEX</div><div class="v" id="poolDex">—</div></div>
+        <div class="stat"><div class="k">Liquidity (USD)</div><div class="v" id="liq">—</div></div>
+        <div class="stat"><div class="k">Close</div><div class="v" id="close">—</div></div>
+        <div class="stat"><div class="k">EMA 9 / 21</div><div class="v" id="ema9_21">—</div></div>
+        <div class="stat"><div class="k">EMA 50 / 200</div><div class="v" id="ema50_200">—</div></div>
+      </div>
+      <div class="debug" id="debug" style="display:none"></div>
+    </section>
+
+    <section class="row" style="margin-top:16px">
+      <div class="col panel">
+        <canvas id="priceChart" height="360"></canvas>
+      </div>
+      <div class="col panel">
+        <canvas id="stochChart" height="360"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Fixed version: Corrected RSI alignment, improved EMA calculation, added debugging info.
+    <br><strong>CORS Fix:</strong> If you see "failed to fetch" errors, serve this file via HTTP server (not file://). 
+    <br>Quick fix: <code>python -m http.server 8000</code> then visit <code>http://localhost:8000</code>
+  </footer>
+
+<script>
+const API_BASE = "https://api.geckoterminal.com/api/v2";
+const NETWORK = "solana";
+const TF = "hour";
+const LIMIT = 500;
+
+// -------------------------- utils --------------------------
+const $ = sel => document.querySelector(sel);
+const fmtUSD = v => (v==null||isNaN(v)?"—":Number(v).toLocaleString(undefined,{maximumFractionDigits:2}));
+const fmt = (v, d=8) => (v==null||isNaN(v)?"—":Number(v).toLocaleString(undefined,{maximumFractionDigits:d}));
+
+async function getJSON(url){
+  try {
+    // Check if we're running locally
+    if (window.location.protocol === 'file:') {
+      throw new Error('CORS Error: Please run this from an HTTP server, not as a local file. See instructions below.');
+    }
+    
+    const res = await fetch(url, {
+      headers: {
+        "accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; CryptoDashboard/1.0)"
+      },
+      mode: 'cors'
+    });
+    
+    if (!res.ok) {
+      if (res.status === 429) {
+        throw new Error(`Rate limit exceeded (${res.status}). Please wait a minute and try again.`);
+      }
+      throw new Error(`HTTP ${res.status} for ${url}`);
+    }
+    return res.json();
+  } catch (error) {
+    if (error.name === 'TypeError' && error.message.includes('fetch')) {
+      throw new Error('CORS/Network Error: Please run this from an HTTP server, not as a local file.');
+    }
+    throw error;
+  }
+}
+
+async function pickTopPool(token){
+  const url = `${API_BASE}/networks/${NETWORK}/tokens/${token}/pools`;
+  const j = await getJSON(url);
+  const arr = j.data || [];
+  if(!arr.length) throw new Error("No pools for token.");
+  arr.sort((a,b)=> (parseFloat(b.attributes.liquidity_usd||0) - parseFloat(a.attributes.liquidity_usd||0)) );
+  return arr[0];
+}
+
+async function fetchOHLCV(poolAddr, aggregate){
+  const url = `${API_BASE}/networks/${NETWORK}/pools/${poolAddr}/ohlcv/${TF}?aggregate=${aggregate}&limit=${LIMIT}`;
+  const j = await getJSON(url);
+  const list = (j?.data?.attributes?.ohlcv_list)||[];
+  if(!list.length) throw new Error("No OHLCV returned.");
+  return list.map(c => ({
+    t: new Date(c[0]*1000), o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
+  }));
+}
+
+// -------------------------- improved indicators --------------------------
+function sma(values, period){
+  const out = Array(values.length).fill(NaN);
+  let sum = 0;
+  for(let i=0;i<values.length;i++){
+    sum += values[i];
+    if(i>=period) sum -= values[i-period];
+    if(i>=period-1) out[i] = sum/period;
+  }
+  return out;
+}
+
+// Fixed EMA: More standard implementation
+function ema(values, period){
+  const out = Array(values.length).fill(NaN);
+  if (!values || values.length === 0) return out;
+  
+  const multiplier = 2 / (period + 1);
+  
+  // Start with SMA for first value
+  let sum = 0;
+  let count = 0;
+  
+  for(let i = 0; i < values.length; i++) {
+    if(i < period - 1) {
+      // Accumulate for initial SMA
+      sum += values[i];
+      count++;
+    } else if(i === period - 1) {
+      // Calculate initial SMA
+      sum += values[i];
+      out[i] = sum / period;
+    } else {
+      // Use EMA formula
+      out[i] = (values[i] * multiplier) + (out[i-1] * (1 - multiplier));
+    }
+  }
+  
+  return out;
+}
+
+// Fixed RSI: Corrected indexing
+function rsi(values, period=14){
+  const out = Array(values.length).fill(NaN);
+  if(values.length < period + 1) return out;
+  
+  const gains = [], losses = [];
+  
+  // Calculate price changes
+  for(let i = 1; i < values.length; i++){
+    const change = values[i] - values[i-1];
+    gains.push(Math.max(change, 0));
+    losses.push(Math.max(-change, 0));
+  }
+  
+  // Initial averages (Wilder's smoothing)
+  let avgGain = 0, avgLoss = 0;
+  for(let i = 0; i < period; i++){
+    avgGain += gains[i];
+    avgLoss += losses[i];
+  }
+  avgGain /= period;
+  avgLoss /= period;
+  
+  // Calculate RSI values
+  for(let i = period; i < gains.length; i++){
+    // Wilder's smoothing
+    avgGain = ((avgGain * (period - 1)) + gains[i]) / period;
+    avgLoss = ((avgLoss * (period - 1)) + losses[i]) / period;
+    
+    const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    const rsiValue = 100 - (100 / (1 + rs));
+    
+    // Fixed: correct alignment (i+1 because gains/losses start at index 1)
+    out[i + 1] = rsiValue;
+  }
+  
+  return out;
+}
+
+// Improved Stochastic RSI
+function stochRsi(rsiValues, kPeriod=14, dPeriod=3, smoothK=3){
+  const stochValues = Array(rsiValues.length).fill(NaN);
+  
+  // Calculate raw stochastic values
+  for(let i = 0; i < rsiValues.length; i++){
+    if(i < kPeriod - 1) continue;
+    
+    // Get window of RSI values
+    const window = [];
+    for(let j = i - kPeriod + 1; j <= i; j++){
+      if(!isNaN(rsiValues[j])) window.push(rsiValues[j]);
+    }
+    
+    if(window.length === 0) continue;
+    
+    const min = Math.min(...window);
+    const max = Math.max(...window);
+    const current = rsiValues[i];
+    
+    if(isNaN(current)) continue;
+    
+    const stoch = max === min ? 0 : ((current - min) / (max - min)) * 100;
+    stochValues[i] = stoch;
+  }
+  
+  // Apply smoothing
+  const k = sma(stochValues, smoothK);
+  const d = sma(k, dPeriod);
+  
+  return {k, d};
+}
+
+// -------------------------- charts --------------------------
+let priceChart, stochChart;
+function makeCharts(labels, close, ema9, ema21, ema50, ema200, stochK, stochD){
+  const grid = {color: getComputedStyle(document.documentElement).getPropertyValue('--grid')};
+  if(priceChart) priceChart.destroy();
+  if(stochChart) stochChart.destroy();
+
+  const ctx1 = document.getElementById('priceChart').getContext('2d');
+  priceChart = new Chart(ctx1, {
+    type:'line',
+    data:{
+      labels, datasets:[
+        {label:'Close', data:close, borderColor:'#59b7ff', pointRadius:0, tension:.25},
+        {label:'EMA 9', data:ema9, borderColor:'#5ad19a', pointRadius:0, borderWidth:1.5, tension:.25},
+        {label:'EMA 21', data:ema21, borderColor:'#ffd166', pointRadius:0, borderWidth:1.5, tension:.25},
+        {label:'EMA 50', data:ema50, borderColor:'#f78c6b', pointRadius:0, borderWidth:1.5, tension:.25},
+        {label:'EMA 200', data:ema200, borderColor:'#e74c3c', pointRadius:0, borderWidth:1.5, tension:.25},
+      ]
+    },
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      scales:{
+        x:{grid},
+        y:{grid}
+      },
+      interaction:{mode:'index', intersect:false},
+      plugins:{legend:{labels:{color:'#cbd5e1'}}}
+    }
+  });
+
+  const ctx2 = document.getElementById('stochChart').getContext('2d');
+  stochChart = new Chart(ctx2, {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        {label:'StochRSI %K', data:stochK, borderColor:'#f1c40f', pointRadius:0, tension:.25},
+        {label:'StochRSI %D', data:stochD, borderColor:'#9b59b6', pointRadius:0, tension:.25}
+      ]
+    },
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      scales:{ 
+        x:{grid}, 
+        y:{grid, suggestedMin:0, suggestedMax:100} 
+      },
+      plugins:{
+        legend:{labels:{color:'#cbd5e1'}},
+        annotation:{
+          annotations: {
+            line1: {
+              type: 'line',
+              yMin: 80, yMax: 80,
+              borderColor: '#e74c3c',
+              borderWidth: 1,
+              borderDash: [5, 5]
+            },
+            line2: {
+              type: 'line',
+              yMin: 20, yMax: 20,
+              borderColor: '#2ecc71',
+              borderWidth: 1,
+              borderDash: [5, 5]
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+// -------------------------- main flow --------------------------
+async function run(){
+  try{
+    const token = $('#token').value.trim();
+    const aggregate = parseInt($('#agg').value,10);
+    $('#status').textContent = 'Resolving pool…';
+
+    const pool = await pickTopPool(token);
+    const addr = pool.attributes.address;
+    $('#poolId').textContent = addr.slice(0,10)+'…';
+    $('#poolDex').textContent = pool.attributes.dex || '—';
+    $('#liq').textContent = '$'+fmtUSD(pool.attributes.liquidity_usd);
+
+    $('#status').textContent = `Fetching OHLCV (${aggregate}× ${TF})…`;
+    const rows = await fetchOHLCV(addr, aggregate);
+
+    const labels = rows.map(r=>r.t.toISOString().replace('T',' ').slice(0,16)+'Z');
+    const close = rows.map(r=>r.c);
+    
+    // Calculate indicators
+    const e9   = ema(close, 9);
+    const e21  = ema(close, 21);
+    const e50  = ema(close, 50);
+    const e200 = ema(close, 200);
+
+    const r = rsi(close, 14);
+    const {k, d} = stochRsi(r, 14, 3, 3);
+
+    const last = rows[rows.length-1];
+    $('#close').textContent = fmt(last.c);
+    $('#ema9_21').textContent = `${fmt(e9.at(-1))} / ${fmt(e21.at(-1))}`;
+    $('#ema50_200').textContent = `${fmt(e50.at(-1))} / ${fmt(e200.at(-1))}`;
+
+    // Debug info
+    const debugEl = $('#debug');
+    debugEl.style.display = 'block';
+    debugEl.innerHTML = `
+      <strong>Debug Info:</strong><br>
+      Data points: ${close.length}<br>
+      Last RSI: ${fmt(r.at(-1), 2)}<br>
+      Last StochRSI K: ${fmt(k.at(-1), 2)}<br>
+      Last StochRSI D: ${fmt(d.at(-1), 2)}<br>
+      EMA 9 last 3 values: ${e9.slice(-3).map(v => fmt(v, 4)).join(', ')}<br>
+      RSI last 3 values: ${r.slice(-3).map(v => fmt(v, 2)).join(', ')}
+    `;
+
+    makeCharts(labels, close, e9, e21, e50, e200, k, d);
+    $('#status').textContent = `Updated: ${new Date().toLocaleString()}`;
+  }catch(err){
+    console.error('Full error details:', err);
+    let errorMsg = err.message;
+    
+    // Provide helpful CORS error messages
+    if (errorMsg.includes('CORS') || errorMsg.includes('Network')) {
+      errorMsg = `${errorMsg}\n\nSolutions:\n1. Run via HTTP server: python -m http.server 8000\n2. Use VS Code Live Server extension\n3. Upload to GitHub Pages or web hosting`;
+    }
+    
+    $('#status').textContent = 'Error: ' + errorMsg;
+    
+    // Show debug info for troubleshooting
+    $('#debug').style.display = 'block';
+    $('#debug').innerHTML = `
+      <strong>Error Details:</strong><br>
+      Protocol: ${window.location.protocol}<br>
+      Origin: ${window.location.origin}<br>
+      Error: ${err.name} - ${err.message}<br>
+      <br><strong>If CORS error:</strong> This file must be served via HTTP(S), not opened directly as file://
+    `;
+  }
+}
+
+$('#refresh').addEventListener('click', run);
+window.addEventListener('load', run);
+</script>
+</body>
+</html>
