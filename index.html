@@ -30,6 +30,8 @@
     footer{padding:16px; color:var(--muted); font-size:12px; text-align:center}
     .note{color:var(--muted); font-size:12px; margin:8px 0}
     .debug{background:#2c1810; border:1px solid #4a2f1e; border-radius:8px; padding:10px; margin:10px 0; font-size:11px}
+    .debug a{color:#59b7ff; text-decoration:none}
+    .debug a:hover{text-decoration:underline}
   </style>
 </head>
 <body>
@@ -44,6 +46,10 @@
         <div>
           <label for="token">Token Address (Solana)</label>
           <input id="token" size="54" value="69LjZUUzxj3Cb3Fxeo1X4QpYEQTboApkhXTysPpbpump" />
+        </div>
+        <div>
+          <label for="poolOverride">Pool Override (optional)</label>
+          <input id="poolOverride" size="44" placeholder="Leave empty for auto-detect highest liquidity" />
         </div>
         <div>
           <label for="agg">Timeframe</label>
@@ -338,14 +344,35 @@ function makeCharts(labels, close, ema9, ema21, ema50, ema200, stochK, stochD){
 async function run(){
   try{
     const token = $('#token').value.trim();
+    const poolOverride = $('#poolOverride').value.trim();
     const aggregate = parseInt($('#agg').value,10);
-    $('#status').textContent = 'Resolving pool…';
-
-    const pool = await pickTopPool(token);
-    const addr = pool.attributes.address;
+    
+    let pool, addr;
+    
+    if (poolOverride) {
+      // Use manually specified pool
+      $('#status').textContent = 'Using specified pool...';
+      addr = poolOverride;
+      // Get pool info
+      const poolUrl = `${API_BASE}/networks/${NETWORK}/pools/${addr}`;
+      const poolData = await getJSON(poolUrl);
+      pool = poolData.data;
+    } else {
+      // Auto-detect highest liquidity pool
+      $('#status').textContent = 'Resolving pool…';
+      pool = await pickTopPool(token);
+      addr = pool.attributes.address;
+    }
+    
     $('#poolId').textContent = addr.slice(0,10)+'…';
     $('#poolDex').textContent = pool.attributes.dex || '—';
-    $('#liq').textContent = '$'+fmtUSD(pool.attributes.liquidity_usd);
+    $('#liq').textContent = '
+
+$('#refresh').addEventListener('click', run);
+window.addEventListener('load', run);
+</script>
+</body>
+</html>+fmtUSD(pool.attributes.liquidity_usd);
 
     $('#status').textContent = `Fetching OHLCV (${aggregate}× ${TF})…`;
     const rows = await fetchOHLCV(addr, aggregate);
@@ -372,12 +399,28 @@ async function run(){
     debugEl.style.display = 'block';
     debugEl.innerHTML = `
       <strong>Debug Info:</strong><br>
+      Pool Address: ${addr}<br>
+      DEX: ${pool.attributes.dex}<br>
+      Pool URL: <a href="https://www.geckoterminal.com/solana/pools/${addr}" target="_blank">View on GeckoTerminal</a><br>
+      DEXScreener URL: <a href="https://dexscreener.com/solana/${addr}" target="_blank">Compare on DEXScreener</a><br>
       Data points: ${close.length}<br>
+      Timeframe: ${aggregate}h candles<br>
+      Price Range: ${fmt(Math.min(...close), 8)} - ${fmt(Math.max(...close), 8)}<br>
+      Last 5 Close Prices: ${close.slice(-5).map(v => fmt(v, 8)).join(', ')}<br>
+      Current Price: ${fmt(last.c, 8)}<br>
+      <br><strong>EMA Values:</strong><br>
+      EMA 9: ${fmt(e9.at(-1), 8)}<br>
+      EMA 21: ${fmt(e21.at(-1), 8)}<br>
+      EMA 50: ${fmt(e50.at(-1), 8)}<br>
+      EMA 200: ${fmt(e200.at(-1), 8)}<br>
+      <br><strong>RSI/StochRSI:</strong><br>
       Last RSI: ${fmt(r.at(-1), 2)}<br>
       Last StochRSI K: ${fmt(k.at(-1), 2)}<br>
       Last StochRSI D: ${fmt(d.at(-1), 2)}<br>
-      EMA 9 last 3 values: ${e9.slice(-3).map(v => fmt(v, 4)).join(', ')}<br>
-      RSI last 3 values: ${r.slice(-3).map(v => fmt(v, 2)).join(', ')}
+      <br><strong>Troubleshooting:</strong><br>
+      1. Check if pool address matches DEXScreener<br>
+      2. Verify timeframe matches (4h vs 1h vs 1d)<br>
+      3. Compare price values above with DEXScreener
     `;
 
     makeCharts(labels, close, e9, e21, e50, e200, k, d);
